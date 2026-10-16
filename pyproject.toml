@@ -55,6 +55,10 @@ strict = true
 mypy_path = "src"
 packages = ["secsentinel"]
 
+[[tool.mypy.overrides]]
+module = ["celery.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
