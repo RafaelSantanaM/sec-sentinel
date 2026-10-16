@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Environment variables & Secrets (NEVER COMMIT!)
+.env
+.env.*
+!.env.example
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDEs & OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Build / Distribution
+dist/
+build/
+*.egg-info/

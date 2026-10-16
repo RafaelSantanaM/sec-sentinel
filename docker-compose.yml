@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: secsentinel-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-secsentinel_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_strong_password_123}
+      POSTGRES_DB: ${POSTGRES_DB:-secsentinel_db}
+    ports:
+      # DEFESA EM PROFUNDIDADE: Expõe apenas para o loopback local (127.0.0.1), nunca 0.0.0.0
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-secsentinel_user} -d ${POSTGRES_DB:-secsentinel_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: secsentinel-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - backend-net
+
+volumes:
+  pgdata:
+
+networks:
+  backend-net:
+    driver: bridge
