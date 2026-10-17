@@ -10,7 +10,12 @@ from secsentinel.db.session import get_db_session
 from secsentinel.models.scan import Scan
 from secsentinel.models.user import User
 from secsentinel.repositories.scan_repo import ScanRepository
-from secsentinel.schemas.scan import ScanCreate, ScanEnqueueResponse, ScanRead
+from secsentinel.schemas.scan import (
+    ScanCreate,
+    ScanEnqueueResponse,
+    ScanExecutiveReport,
+    ScanRead,
+)
 from secsentinel.services.scan_service import (
     ScanAccessDeniedError,
     ScanNotFoundError,
@@ -57,6 +62,31 @@ async def get_scan_status_and_report(
     """
     try:
         return await scan_service.get_scan_for_user(scan_id, current_user)
+    except ScanNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ScanAccessDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/{scan_id}/report", response_model=ScanExecutiveReport)
+async def get_scan_executive_report(
+    scan_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    scan_service: Annotated[ScanService, Depends(get_scan_service)],
+) -> ScanExecutiveReport:
+    """
+    Retorna o Relatório Executivo consolidado com Risk Score (0-10),
+    veredito de CI/CD Quality Gate (PASS/WARN/BLOCK) e métricas por severidade e motor.
+    Protegido contra BOLA/IDOR.
+    """
+    try:
+        return await scan_service.get_executive_report_for_user(scan_id, current_user)
     except ScanNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

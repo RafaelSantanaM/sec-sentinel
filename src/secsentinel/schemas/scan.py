@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from secsentinel.models.finding import ScannerCategory, SeverityLevel
 from secsentinel.models.scan import ScanStatus, ScanType
+from secsentinel.services.risk_engine import SecurityVerdict
 
 BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain", "metadata.google.internal"}
 
@@ -113,4 +114,24 @@ class ScanRead(BaseModel):
     error_message: str | None = None
     created_at: datetime
     updated_at: datetime
+    findings: list[FindingRead] = []
+
+
+class ScanExecutiveReport(BaseModel):
+    """
+    Relatório Executivo e de CI/CD Gate consolidado de um Scan:
+    Inclui o veredito (PASS/WARN/BLOCK), pontuação de risco (0-10),
+    contagem por severidade/categoria e vulnerabilidades ordenadas por criticidade.
+    """
+
+    scan_id: UUID
+    target: str
+    scan_type: ScanType
+    status: ScanStatus
+    risk_score: float
+    verdict: SecurityVerdict
+    total_findings: int
+    severity_breakdown: dict[str, int]
+    category_breakdown: dict[str, int]
+    created_at: datetime
     findings: list[FindingRead] = []

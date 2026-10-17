@@ -2,10 +2,20 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from secsentinel.models.scan import Scan
+from secsentinel.models.scan import Scan, ScanType
 from secsentinel.models.user import User, UserRole
 from secsentinel.repositories.scan_repo import ScanRepository
-from secsentinel.schemas.scan import ScanCreate, ScanEnqueueResponse
+from secsentinel.scanners.base import RawFinding
+from secsentinel.scanners.dast.engine import APIProber
+from secsentinel.scanners.sast.engine import SASTEngine
+from secsentinel.scanners.secrets.engine import SecretScanner
+from secsentinel.schemas.scan import (
+    FindingRead,
+    ScanCreate,
+    ScanEnqueueResponse,
+    ScanExecutiveReport,
+)
+from secsentinel.services.risk_engine import calculate_risk_assessment
 from secsentinel.worker.tasks import execute_security_scan_task
 
 
@@ -41,7 +51,7 @@ def default_task_dispatcher(
 
 
 class ScanService:
-    """Orquestra a criação de auditorias, enfileiramento no Celery e controle de acesso BOLA."""
+    """Orquestra a criação de auditorias, execução dos motores, cálculo de risco e BOLA."""
 
     def __init__(
         self,
@@ -83,6 +93,48 @@ class ScanService:
             celery_task_id=task_id,
         )
 
+    async def execute_scan_pipeline(
+        self,
+        scan_id: UUID,
+        code_snippet: str | None = None,
+        dast_prober: APIProber | None = None,
+    ) -> Scan:
+        """
+        Executa os motores de segurança (SecretScanner, SASTEngine e/ou APIProber),
+        calcula o Risk Score consolidado e persiste os achados no banco.
+        """
+        scan = await self._scan_repo.get_by_id(scan_id)
+        if scan is None:
+            raise ScanNotFoundError("Scan não encontrado para execução.")
+
+        all_findings: list[RawFinding] = []
+
+        try:
+            # 1. Motores White-Box (Secrets + SAST) para PR_AUDIT e FULL_AUDIT
+            if scan.scan_type in (ScanType.PR_AUDIT, ScanType.FULL_AUDIT) and code_snippet:
+                secret_scanner = SecretScanner()
+                sast_engine = SASTEngine()
+                all_findings.extend(
+                    secret_scanner.scan_text(code_snippet, file_path=scan.target)
+                )
+                all_findings.extend(sast_engine.scan_code(code_snippet, file_path=scan.target))
+
+            # 2. Motor Black-Box (Mini-DAST) para API_AUDIT e FULL_AUDIT
+            if scan.scan_type in (ScanType.API_AUDIT, ScanType.FULL_AUDIT):
+                prober = dast_prober or APIProber()
+                dast_findings = await prober.probe_endpoint(scan.target)
+                all_findings.extend(dast_findings)
+
+            assessment = calculate_risk_assessment(all_findings)
+            return await self._scan_repo.complete_scan_with_findings(
+                scan=scan,
+                raw_findings=all_findings,
+                risk_score=assessment.risk_score,
+            )
+        except Exception as exc:
+            await self._scan_repo.mark_failed(scan, str(exc))
+            raise
+
     async def get_scan_for_user(self, scan_id: UUID, current_user: User) -> Scan:
         """
         Busca um Scan aplicando defesa estrita contra BOLA / IDOR (OWASP API1:2023):
@@ -100,3 +152,45 @@ class ScanService:
             )
 
         return scan
+
+    async def get_executive_report_for_user(
+        self, scan_id: UUID, current_user: User
+    ) -> ScanExecutiveReport:
+        """
+        Gera o Relatório Executivo Consolidado com cálculo de veredito (PASS/WARN/BLOCK),
+        distribuição por severidade/categoria e vulnerabilidades ordenadas por CVSS.
+        """
+        scan = await self.get_scan_for_user(scan_id, current_user)
+
+        raw_findings = [
+            RawFinding(
+                category=f.category,
+                severity=f.severity,
+                cvss_score=f.cvss_score,
+                title=f.title,
+                description=f.description,
+                remediation=f.remediation,
+                file_path=f.file_path,
+                line_number=f.line_number,
+            )
+            for f in scan.findings
+        ]
+        assessment = calculate_risk_assessment(raw_findings)
+
+        sorted_finding_models = sorted(
+            scan.findings, key=lambda f: f.cvss_score, reverse=True
+        )
+
+        return ScanExecutiveReport(
+            scan_id=scan.id,
+            target=scan.target,
+            scan_type=scan.scan_type,
+            status=scan.status,
+            risk_score=assessment.risk_score,
+            verdict=assessment.verdict,
+            total_findings=assessment.total_findings,
+            severity_breakdown=assessment.severity_breakdown,
+            category_breakdown=assessment.category_breakdown,
+            created_at=scan.created_at,
+            findings=[FindingRead.model_validate(f) for f in sorted_finding_models],
+        )
