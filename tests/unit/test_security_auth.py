@@ -417,3 +417,172 @@ async def test_admin_can_promote_user_but_cannot_modify_own_role(
         )
         assert not_found_resp.status_code == status.HTTP_404_NOT_FOUND
 
+
+@pytest.mark.asyncio
+async def test_auth_service_register_success_and_duplicate_email() -> None:
+    """Testa register_user no AuthService: sucesso (DEVELOPER) e erro em e-mail duplicado."""
+    from secsentinel.repositories.user_repo import UserRepository
+    from secsentinel.services.auth_service import AuthService, UserAlreadyExistsError
+
+    users_by_email: dict[str, User] = {}
+
+    class FakeUserRepo(UserRepository):
+        def __init__(self) -> None:
+            pass
+
+        async def get_by_email(self, email: str) -> User | None:
+            return users_by_email.get(email.lower().strip())
+
+        async def create(
+            self, email: str, hashed_password: str, role: UserRole
+        ) -> User:
+            user = User(
+                id=uuid4(),
+                email=email.lower().strip(),
+                hashed_password=hashed_password,
+                role=role,
+                is_active=True,
+            )
+            users_by_email[user.email] = user
+            return user
+
+    service = AuthService(FakeUserRepo())
+    dto = UserCreate(email="dup@secsentinel.io", password="ValidPass#2026!")
+
+    created = await service.register_user(dto)
+    assert created.email == "dup@secsentinel.io"
+    assert created.role == UserRole.DEVELOPER
+    assert verify_password("ValidPass#2026!", created.hashed_password) is True
+
+    with pytest.raises(UserAlreadyExistsError):
+        await service.register_user(dto)
+
+
+@pytest.mark.asyncio
+async def test_auth_service_authenticate_success_wrong_password_missing_and_inactive() -> None:
+    """
+    Testa authenticate no AuthService:
+    1. Sucesso (emite access_token e refresh_token válidos).
+    2. Senha incorreta -> AuthenticationError.
+    3. Usuário inexistente -> AuthenticationError (com mitigação de timing attack).
+    4. Usuário inativo -> AuthenticationError.
+    """
+    from secsentinel.repositories.user_repo import UserRepository
+    from secsentinel.services.auth_service import AuthenticationError, AuthService
+
+    active_user = User(
+        id=uuid4(),
+        email="active@secsentinel.io",
+        hashed_password=hash_password("ValidPass#2026!"),
+        role=UserRole.DEVELOPER,
+        is_active=True,
+    )
+    inactive_user = User(
+        id=uuid4(),
+        email="inactive@secsentinel.io",
+        hashed_password=hash_password("ValidPass#2026!"),
+        role=UserRole.DEVELOPER,
+        is_active=False,
+    )
+    users_by_email = {
+        active_user.email: active_user,
+        inactive_user.email: inactive_user,
+    }
+
+    class FakeUserRepo(UserRepository):
+        def __init__(self) -> None:
+            pass
+
+        async def get_by_email(self, email: str) -> User | None:
+            return users_by_email.get(email.lower().strip())
+
+    service = AuthService(FakeUserRepo())
+
+    # 1. Login com sucesso
+    tokens = await service.authenticate("active@secsentinel.io", "ValidPass#2026!")
+    access_payload = decode_and_verify_jwt(tokens.access_token, expected_scope=TokenScope.ACCESS)
+    refresh_payload = decode_and_verify_jwt(
+        tokens.refresh_token, expected_scope=TokenScope.REFRESH
+    )
+    assert access_payload["sub"] == str(active_user.id)
+    assert refresh_payload["sub"] == str(active_user.id)
+
+    # 2. Senha errada
+    with pytest.raises(AuthenticationError):
+        await service.authenticate("active@secsentinel.io", "WrongPass#2026!")
+
+    # 3. Usuário inexistente
+    with pytest.raises(AuthenticationError):
+        await service.authenticate("ghost@secsentinel.io", "ValidPass#2026!")
+
+    # 4. Usuário inativo
+    with pytest.raises(AuthenticationError):
+        await service.authenticate("inactive@secsentinel.io", "ValidPass#2026!")
+
+
+@pytest.mark.asyncio
+async def test_auth_service_rotate_tokens_valid_access_confusion_and_inactive() -> None:
+    """
+    Testa rotate_tokens no AuthService:
+    1. Refresh token válido -> emite novo par de tokens.
+    2. Access token usado como refresh -> AuthenticationError.
+    3. Usuário inativo -> AuthenticationError.
+    """
+    from secsentinel.repositories.user_repo import UserRepository
+    from secsentinel.services.auth_service import AuthenticationError, AuthService
+
+    active_user = User(
+        id=uuid4(),
+        email="rotate@secsentinel.io",
+        hashed_password=hash_password("ValidPass#2026!"),
+        role=UserRole.AUDITOR,
+        is_active=True,
+    )
+    inactive_user = User(
+        id=uuid4(),
+        email="disabled@secsentinel.io",
+        hashed_password=hash_password("ValidPass#2026!"),
+        role=UserRole.DEVELOPER,
+        is_active=False,
+    )
+    users_by_id = {active_user.id: active_user, inactive_user.id: inactive_user}
+
+    class FakeUserRepo(UserRepository):
+        def __init__(self) -> None:
+            pass
+
+        async def get_by_id(self, user_id: object) -> User | None:
+            return users_by_id.get(user_id)  # type: ignore[arg-type]
+
+    service = AuthService(FakeUserRepo())
+
+    # 1. Refresh token válido
+    valid_refresh = create_jwt_token(
+        subject=str(active_user.id),
+        role=active_user.role,
+        scope=TokenScope.REFRESH,
+    )
+    rotated = await service.rotate_tokens(valid_refresh)
+    new_access = decode_and_verify_jwt(rotated.access_token, expected_scope=TokenScope.ACCESS)
+    new_refresh = decode_and_verify_jwt(rotated.refresh_token, expected_scope=TokenScope.REFRESH)
+    assert new_access["sub"] == str(active_user.id)
+    assert new_refresh["sub"] == str(active_user.id)
+
+    # 2. Access token usado no lugar de refresh token (Token Type Confusion)
+    access_tok = create_jwt_token(
+        subject=str(active_user.id),
+        role=active_user.role,
+        scope=TokenScope.ACCESS,
+    )
+    with pytest.raises(AuthenticationError):
+        await service.rotate_tokens(access_tok)
+
+    # 3. Refresh token de usuário inativo
+    inactive_refresh = create_jwt_token(
+        subject=str(inactive_user.id),
+        role=inactive_user.role,
+        scope=TokenScope.REFRESH,
+    )
+    with pytest.raises(AuthenticationError):
+        await service.rotate_tokens(inactive_refresh)
+
