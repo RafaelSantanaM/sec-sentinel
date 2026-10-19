@@ -35,6 +35,98 @@ services:
     networks:
       - backend-net
 
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secsentinel-migrations
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend-net
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secsentinel-api
+    restart: unless-stopped
+    command: ["uvicorn", "secsentinel.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend-net
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secsentinel-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "secsentinel.worker.celery_app:celery_app", "worker", "--loglevel=info"]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "celery", "-A", "secsentinel.worker.celery_app:celery_app", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - backend-net
+
 volumes:
   pgdata:
 
