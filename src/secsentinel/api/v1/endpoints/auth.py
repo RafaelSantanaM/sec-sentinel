@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,11 +15,14 @@ from secsentinel.schemas.auth import (
     TokenResponse,
     UserCreate,
     UserRead,
+    UserRoleUpdate,
 )
 from secsentinel.services.auth_service import (
     AuthenticationError,
     AuthService,
+    SelfRoleModificationError,
     UserAlreadyExistsError,
+    UserNotFoundError,
 )
 
 router = APIRouter(prefix="/auth", tags=["Auth & RBAC"])
@@ -99,3 +103,29 @@ async def admin_or_auditor_only(
 ) -> User:
     """Rota protegida por RBAC: apenas ADMIN e AUDITOR possuem permissão."""
     return current_user
+
+
+@router.patch("/users/{user_id}/role", response_model=UserRead)
+async def update_user_role(
+    user_id: UUID,
+    payload: UserRoleUpdate,
+    current_admin: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+) -> User:
+    """Promove ou altera o papel de um usuário (exclusivo para ADMIN; proíbe auto-alteração)."""
+    try:
+        return await auth_service.update_user_role(
+            target_user_id=user_id,
+            new_role=payload.role,
+            acting_admin=current_admin,
+        )
+    except SelfRoleModificationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except UserNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc

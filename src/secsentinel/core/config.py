@@ -17,7 +17,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    ENVIRONMENT: Literal["development", "staging", "production"] = "development"
+    ENVIRONMENT: Literal["development", "testing", "staging", "production"] = "development"
     PROJECT_NAME: str = "SecSentinel"
     DEBUG: bool = False
 
@@ -38,15 +38,33 @@ class Settings(BaseSettings):
     @classmethod
     def validate_jwt_secret_strength(cls, v: SecretStr) -> SecretStr:
         """
-        Impede chaves fracas (ex: '123456' ou 'secret') que seriam facilmente
-        quebradas via brute-force offline com hashcat/john.
-        Exige no mínimo 32 caracteres (256 bits para HS256 conforme RFC 7518).
+        Impede chaves fracas, placeholders públicos (CWE-1392/CWE-798) ou chaves de baixa
+        diversidade (CWE-321) que seriam facilmente forjadas ou quebradas offline.
+        Exige no mínimo 32 caracteres (256 bits para HS256 conforme RFC 7518) e >= 10
+        caracteres distintos.
         """
         secret_value = v.get_secret_value()
+        known_placeholders = {
+            "gere_uma_chave_hexadecimal_forte_com_pelo_menos_32_caracteres_aqui",
+            "change_me",
+            "changeme",
+        }
+        if secret_value.strip().lower() in known_placeholders:
+            raise ValueError(
+                "A variável JWT_SECRET_KEY utiliza um valor placeholder público conhecido! "
+                "Gere uma chave exclusiva com: `openssl rand -hex 32`."
+            )
         if len(secret_value) < 32:
             raise ValueError(
                 "A variável JWT_SECRET_KEY é insegura! "
-                "Deve conter no mínimo 32 caracteres (256 bits)."
+                "Deve conter no mínimo 32 caracteres (256 bits). "
+                "Gere uma chave forte com: `openssl rand -hex 32`."
+            )
+        if len(set(secret_value)) < 10:
+            raise ValueError(
+                "A variável JWT_SECRET_KEY possui baixa diversidade/entropia "
+                "(mínimo de 10 caracteres distintos). "
+                "Gere uma chave forte com: `openssl rand -hex 32`."
             )
         return v
 

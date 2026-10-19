@@ -9,9 +9,10 @@ from secsentinel.models.user import UserRole
 class UserCreate(BaseModel):
     """Schema de entrada para criação de usuário com validação estrita de senha (OWASP ASVS)."""
 
+    model_config = ConfigDict(extra="forbid")
+
     email: EmailStr
     password: str = Field(min_length=12, max_length=128)
-    role: UserRole = UserRole.DEVELOPER
 
     @field_validator("password")
     @classmethod
@@ -29,6 +30,14 @@ class UserCreate(BaseModel):
         if not re.search(r"[^A-Za-z0-9]", v):
             raise ValueError("A senha deve conter pelo menos um caractere especial.")
         return v
+
+
+class UserRoleUpdate(BaseModel):
+    """Schema estrito para alteração administrativa de papel RBAC."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: UserRole
 
 
 class UserRead(BaseModel):

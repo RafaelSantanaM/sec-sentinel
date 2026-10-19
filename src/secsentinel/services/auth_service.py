@@ -9,7 +9,7 @@ from secsentinel.core.security import (
     hash_password,
     verify_password,
 )
-from secsentinel.models.user import User
+from secsentinel.models.user import User, UserRole
 from secsentinel.repositories.user_repo import UserRepository
 from secsentinel.schemas.auth import TokenResponse, UserCreate
 
@@ -22,6 +22,18 @@ class AuthenticationError(Exception):
 
 class UserAlreadyExistsError(Exception):
     """Levantada ao tentar registrar um e-mail já cadastrado."""
+
+    pass
+
+
+class UserNotFoundError(Exception):
+    """Levantada quando o usuário alvo não é encontrado."""
+
+    pass
+
+
+class SelfRoleModificationError(Exception):
+    """Levantada quando um administrador tenta alterar o próprio papel RBAC."""
 
     pass
 
@@ -41,8 +53,26 @@ class AuthService:
         return await self._user_repo.create(
             email=data.email,
             hashed_password=hashed,
-            role=data.role,
+            role=UserRole.DEVELOPER,
         )
+
+    async def update_user_role(
+        self,
+        target_user_id: UUID,
+        new_role: UserRole,
+        acting_admin: User,
+    ) -> User:
+        """Promove ou altera o papel de um usuário, bloqueando auto-alteração de privilégio."""
+        if target_user_id == acting_admin.id:
+            raise SelfRoleModificationError(
+                "Operação bloqueada: um administrador não pode alterar o próprio papel."
+            )
+
+        target_user = await self._user_repo.get_by_id(target_user_id)
+        if target_user is None:
+            raise UserNotFoundError("Usuário não encontrado.")
+
+        return await self._user_repo.update_role(target_user, new_role)
 
     async def authenticate(self, email: str, password: str) -> TokenResponse:
         """

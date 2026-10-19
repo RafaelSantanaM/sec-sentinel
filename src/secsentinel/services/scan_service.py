@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from typing import Any
 from uuid import UUID
@@ -6,7 +7,7 @@ from secsentinel.models.scan import Scan, ScanType
 from secsentinel.models.user import User, UserRole
 from secsentinel.repositories.scan_repo import ScanRepository
 from secsentinel.scanners.base import RawFinding
-from secsentinel.scanners.dast.engine import APIProber
+from secsentinel.scanners.dast.engine import APIProber, SSRFResolutionError
 from secsentinel.scanners.sast.engine import SASTEngine
 from secsentinel.scanners.secrets.engine import SecretScanner
 from secsentinel.schemas.scan import (
@@ -16,7 +17,21 @@ from secsentinel.schemas.scan import (
     ScanExecutiveReport,
 )
 from secsentinel.services.risk_engine import calculate_risk_assessment
-from secsentinel.worker.tasks import execute_security_scan_task
+
+logger = logging.getLogger(__name__)
+
+
+def sanitize_scan_error(exc: Exception) -> str:
+    """
+    Prevenção de CWE-209 (Generation of Error Message Containing Sensitive Information):
+    Garante que nenhum stack trace, credencial de banco ou IP interno vaze para error_message.
+    """
+    if isinstance(exc, SSRFResolutionError):
+        return str(exc)[:500]
+    return (
+        f"Falha interna ao executar os motores de segurança ({type(exc).__name__}). "
+        "Consulte os logs internos do servidor."
+    )
 
 
 class ScanNotFoundError(Exception):
@@ -41,6 +56,8 @@ def default_task_dispatcher(
     code_snippet: str | None,
 ) -> str:
     """Enfileira a task no Celery/Redis e retorna o ID do job assíncrono."""
+    from secsentinel.worker.tasks import execute_security_scan_task
+
     async_result = execute_security_scan_task.delay(
         scan_id=scan_id,
         target_url=target_url,
@@ -110,6 +127,8 @@ class ScanService:
         all_findings: list[RawFinding] = []
 
         try:
+            scan = await self._scan_repo.mark_running(scan)
+
             # 1. Motores White-Box (Secrets + SAST) para PR_AUDIT e FULL_AUDIT
             if scan.scan_type in (ScanType.PR_AUDIT, ScanType.FULL_AUDIT) and code_snippet:
                 secret_scanner = SecretScanner()
@@ -132,7 +151,8 @@ class ScanService:
                 risk_score=assessment.risk_score,
             )
         except Exception as exc:
-            await self._scan_repo.mark_failed(scan, str(exc))
+            logger.exception("Erro ao executar pipeline do Scan ID=%s", scan_id, exc_info=exc)
+            await self._scan_repo.mark_failed(scan, sanitize_scan_error(exc))
             raise
 
     async def get_scan_for_user(self, scan_id: UUID, current_user: User) -> Scan:
