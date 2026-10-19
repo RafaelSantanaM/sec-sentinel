@@ -118,7 +118,14 @@ def test_celery_worker_task_executes_pr_audit_and_returns_assessment(
         ]
         return scan
 
+    dispose_called = False
+
+    async def fake_dispose() -> None:
+        nonlocal dispose_called
+        dispose_called = True
+
     monkeypatch.setattr(tasks, "AsyncSessionLocal", lambda: DummySessionContext())
+    monkeypatch.setattr(tasks.engine, "dispose", fake_dispose)
     monkeypatch.setattr(
         "secsentinel.repositories.scan_repo.ScanRepository.get_by_id",
         fake_get_by_id,
@@ -147,6 +154,7 @@ def test_celery_worker_task_executes_pr_audit_and_returns_assessment(
     assert result["verdict"] == "BLOCK"
     assert result["risk_score"] >= 8.5
     assert result["total_findings"] == len(stored_scan.findings)
+    assert dispose_called is True
 
 
 def test_celery_worker_task_marks_failed_with_sanitized_error_on_exception(
@@ -197,7 +205,14 @@ def test_celery_worker_task_marks_failed_with_sanitized_error_on_exception(
             "Traceback: DB failure postgresql+asyncpg://root:TopSecretPass@10.0.0.9:5432/sec"
         )
 
+    dispose_called = False
+
+    async def fake_dispose() -> None:
+        nonlocal dispose_called
+        dispose_called = True
+
     monkeypatch.setattr(tasks, "AsyncSessionLocal", lambda: DummySessionContext())
+    monkeypatch.setattr(tasks.engine, "dispose", fake_dispose)
     monkeypatch.setattr(
         "secsentinel.repositories.scan_repo.ScanRepository.get_by_id",
         fake_get_by_id,
@@ -229,3 +244,4 @@ def test_celery_worker_task_marks_failed_with_sanitized_error_on_exception(
     assert "TopSecretPass" not in stored_scan.error_message
     assert "10.0.0.9" not in stored_scan.error_message
     assert "Traceback" not in stored_scan.error_message
+    assert dispose_called is True

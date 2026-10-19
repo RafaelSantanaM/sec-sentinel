@@ -3,7 +3,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from secsentinel.db.session import AsyncSessionLocal
+from secsentinel.db.session import AsyncSessionLocal, engine
 from secsentinel.repositories.scan_repo import ScanRepository
 from secsentinel.scanners.base import RawFinding
 from secsentinel.services.risk_engine import calculate_risk_assessment
@@ -18,13 +18,16 @@ async def _run_scan_pipeline_async(
     code_snippet: str | None = None,
 ) -> dict[str, Any]:
     """Abre uma AsyncSession dedicada do worker e delega ao ScanService.execute_scan_pipeline."""
-    async with AsyncSessionLocal() as session:
-        scan_repo = ScanRepository(session)
-        scan_service = ScanService(scan_repo=scan_repo)
-        scan = await scan_service.execute_scan_pipeline(
-            scan_id=scan_id,
-            code_snippet=code_snippet,
-        )
+    try:
+        async with AsyncSessionLocal() as session:
+            scan_repo = ScanRepository(session)
+            scan_service = ScanService(scan_repo=scan_repo)
+            scan = await scan_service.execute_scan_pipeline(
+                scan_id=scan_id,
+                code_snippet=code_snippet,
+            )
+    finally:
+        await engine.dispose()
 
     raw_findings = [
         RawFinding(
