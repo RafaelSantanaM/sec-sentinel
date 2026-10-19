@@ -49,6 +49,14 @@ class ScanRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def mark_running(self, scan: Scan) -> Scan:
+        """Marca o Scan como RUNNING ao iniciar o processamento no worker."""
+        scan.status = ScanStatus.RUNNING
+        if hasattr(self, "_session") and self._session is not None:
+            await self._session.commit()
+            await self._session.refresh(scan)
+        return scan
+
     async def complete_scan_with_findings(
         self,
         scan: Scan,
@@ -79,6 +87,7 @@ class ScanRepository:
         """Marca o Scan como FAILED caso ocorra erro ou bloqueio SSRF na execução."""
         scan.status = ScanStatus.FAILED
         scan.error_message = error_message[:1000]
-        await self._session.commit()
-        await self._session.refresh(scan)
+        if hasattr(self, "_session") and self._session is not None:
+            await self._session.commit()
+            await self._session.refresh(scan)
         return scan

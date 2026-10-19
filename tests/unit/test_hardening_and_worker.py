@@ -1,8 +1,15 @@
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from secsentinel.main import create_app
-from secsentinel.models.scan import ScanType
+from secsentinel.models.finding import Finding
+from secsentinel.models.scan import Scan, ScanStatus, ScanType
+from secsentinel.scanners.base import RawFinding
+from secsentinel.worker import tasks
 from secsentinel.worker.tasks import execute_security_scan_task
 
 
@@ -44,20 +51,181 @@ async def test_health_check_endpoint() -> None:
     assert resp.json()["status"] == "ok"
 
 
-def test_celery_worker_task_executes_pr_audit_and_returns_assessment() -> None:
+def test_celery_worker_task_executes_pr_audit_and_returns_assessment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
-    Testa a execução direta da task do Celery Worker em modo PR_AUDIT,
-    garantindo que ela acione SecretScanner + SASTEngine e retorne o veredito BLOCK.
+    Testa a execução direta da task do Celery Worker em modo PR_AUDIT:
+    - Abre sessão assíncrona e delega ao ScanService.execute_scan_pipeline.
+    - Transita o status do Scan por RUNNING e COMPLETED.
+    - Persiste os Findings no banco e retorna o veredito BLOCK.
     """
+    scan_uuid = UUID("00000000-0000-0000-0000-000000000123")
+    now = datetime.now(UTC)
+    stored_scan = Scan(
+        id=scan_uuid,
+        target="https://github.com/org/repo/pull/99",
+        scan_type=ScanType.PR_AUDIT,
+        status=ScanStatus.PENDING,
+        triggered_by_id=uuid4(),
+        risk_score=0.0,
+        created_at=now,
+        updated_at=now,
+        findings=[],
+    )
+    observed_statuses: list[ScanStatus] = []
+
+    class DummySessionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    async def fake_get_by_id(self: object, scan_id: UUID) -> Scan | None:
+        return stored_scan if scan_id == scan_uuid else None
+
+    async def fake_mark_running(self: object, scan: Scan) -> Scan:
+        scan.status = ScanStatus.RUNNING
+        observed_statuses.append(scan.status)
+        return scan
+
+    async def fake_complete_scan_with_findings(
+        self: object,
+        scan: Scan,
+        raw_findings: Sequence[RawFinding],
+        risk_score: float,
+    ) -> Scan:
+        scan.status = ScanStatus.COMPLETED
+        observed_statuses.append(scan.status)
+        scan.risk_score = risk_score
+        scan.findings = [
+            Finding(
+                id=uuid4(),
+                scan_id=scan.id,
+                category=raw.category,
+                severity=raw.severity,
+                cvss_score=raw.cvss_score,
+                title=raw.title,
+                description=raw.description,
+                file_path=raw.file_path,
+                line_number=raw.line_number,
+                remediation=raw.remediation,
+                created_at=now,
+                updated_at=now,
+            )
+            for raw in raw_findings
+        ]
+        return scan
+
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", lambda: DummySessionContext())
+    monkeypatch.setattr(
+        "secsentinel.repositories.scan_repo.ScanRepository.get_by_id",
+        fake_get_by_id,
+    )
+    monkeypatch.setattr(
+        "secsentinel.repositories.scan_repo.ScanRepository.mark_running",
+        fake_mark_running,
+    )
+    monkeypatch.setattr(
+        "secsentinel.repositories.scan_repo.ScanRepository.complete_scan_with_findings",
+        fake_complete_scan_with_findings,
+    )
+
     vulnerable_diff = 'import os\nos.system(f"rm -rf {user_dir}")\n'
     result = execute_security_scan_task(
-        scan_id="00000000-0000-0000-0000-000000000123",
-        target_url="https://github.com/org/repo/pull/99",
+        scan_id=str(scan_uuid),
+        target_url=stored_scan.target,
         scan_type=ScanType.PR_AUDIT.value,
         code_snippet=vulnerable_diff,
     )
 
+    assert observed_statuses == [ScanStatus.RUNNING, ScanStatus.COMPLETED]
+    assert stored_scan.status == ScanStatus.COMPLETED
+    assert len(stored_scan.findings) >= 1
     assert result["status"] == "completed"
     assert result["verdict"] == "BLOCK"
     assert result["risk_score"] >= 8.5
-    assert result["total_findings"] >= 1
+    assert result["total_findings"] == len(stored_scan.findings)
+
+
+def test_celery_worker_task_marks_failed_with_sanitized_error_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Garante que falhas durante a execução marquem o Scan como FAILED e gravem
+    uma error_message sanitizada (sem stack trace ou segredos internos - CWE-209).
+    """
+    scan_uuid = UUID("00000000-0000-0000-0000-000000000999")
+    now = datetime.now(UTC)
+    stored_scan = Scan(
+        id=scan_uuid,
+        target="https://api.example.com/v1/health",
+        scan_type=ScanType.API_AUDIT,
+        status=ScanStatus.PENDING,
+        triggered_by_id=uuid4(),
+        risk_score=0.0,
+        created_at=now,
+        updated_at=now,
+        findings=[],
+    )
+    observed_statuses: list[ScanStatus] = []
+
+    class DummySessionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    async def fake_get_by_id(self: object, scan_id: UUID) -> Scan | None:
+        return stored_scan if scan_id == scan_uuid else None
+
+    async def fake_mark_running(self: object, scan: Scan) -> Scan:
+        scan.status = ScanStatus.RUNNING
+        observed_statuses.append(scan.status)
+        return scan
+
+    async def fake_mark_failed(self: object, scan: Scan, error_message: str) -> Scan:
+        scan.status = ScanStatus.FAILED
+        scan.error_message = error_message
+        observed_statuses.append(scan.status)
+        return scan
+
+    async def fake_leaky_probe(self: object, target_url: str) -> list[RawFinding]:
+        raise RuntimeError(
+            "Traceback: DB failure postgresql+asyncpg://root:TopSecretPass@10.0.0.9:5432/sec"
+        )
+
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", lambda: DummySessionContext())
+    monkeypatch.setattr(
+        "secsentinel.repositories.scan_repo.ScanRepository.get_by_id",
+        fake_get_by_id,
+    )
+    monkeypatch.setattr(
+        "secsentinel.repositories.scan_repo.ScanRepository.mark_running",
+        fake_mark_running,
+    )
+    monkeypatch.setattr(
+        "secsentinel.repositories.scan_repo.ScanRepository.mark_failed",
+        fake_mark_failed,
+    )
+    monkeypatch.setattr(
+        "secsentinel.scanners.dast.engine.APIProber.probe_endpoint",
+        fake_leaky_probe,
+    )
+
+    with pytest.raises(RuntimeError):
+        execute_security_scan_task(
+            scan_id=str(scan_uuid),
+            target_url=stored_scan.target,
+            scan_type=ScanType.API_AUDIT.value,
+            code_snippet=None,
+        )
+
+    assert observed_statuses == [ScanStatus.RUNNING, ScanStatus.FAILED]
+    assert stored_scan.status == ScanStatus.FAILED
+    assert stored_scan.error_message is not None
+    assert "TopSecretPass" not in stored_scan.error_message
+    assert "10.0.0.9" not in stored_scan.error_message
+    assert "Traceback" not in stored_scan.error_message
