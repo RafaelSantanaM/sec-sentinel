@@ -92,3 +92,34 @@ def test_secret_str_does_not_leak_in_repr() -> None:
     # Ao converter para string ou repr, o valor real jamais deve aparecer
     assert real_secret not in repr(cfg)
     assert "my_db_secret_password" not in repr(cfg)
+
+
+def test_environment_testing_is_accepted_and_docs_disabled_only_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Garante que ENVIRONMENT='testing' (usado no pipeline CI) seja aceito pelo Settings
+    e que /docs permaneça habilitado em testing/development, mas desabilitado em production.
+    """
+    from secsentinel.core import config as config_module
+    from secsentinel.main import create_app
+
+    cfg = Settings(
+        ENVIRONMENT="testing",
+        JWT_SECRET_KEY=SecretStr(secrets.token_hex(32)),
+        POSTGRES_USER="user",
+        POSTGRES_PASSWORD=SecretStr("password"),
+        POSTGRES_DB="db",
+    )
+    assert cfg.ENVIRONMENT == "testing"
+
+    monkeypatch.setattr(config_module.settings, "ENVIRONMENT", "testing")
+    testing_app = create_app()
+    assert testing_app.docs_url == "/docs"
+
+    monkeypatch.setattr(config_module.settings, "ENVIRONMENT", "production")
+    prod_app = create_app()
+    assert prod_app.docs_url is None
+    assert prod_app.redoc_url is None
+    assert prod_app.openapi_url is None
+

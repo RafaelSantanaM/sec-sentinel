@@ -17,7 +17,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    ENVIRONMENT: Literal["development", "staging", "production"] = "development"
+    ENVIRONMENT: Literal["development", "testing", "staging", "production"] = "development"
     PROJECT_NAME: str = "SecSentinel"
     DEBUG: bool = False
 
