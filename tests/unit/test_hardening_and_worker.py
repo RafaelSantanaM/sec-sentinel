@@ -120,12 +120,13 @@ def test_celery_worker_task_executes_pr_audit_and_returns_assessment(
 
     dispose_called = False
 
-    async def fake_dispose() -> None:
-        nonlocal dispose_called
-        dispose_called = True
+    class DummyEngine:
+        async def dispose(self) -> None:
+            nonlocal dispose_called
+            dispose_called = True
 
     monkeypatch.setattr(tasks, "AsyncSessionLocal", lambda: DummySessionContext())
-    monkeypatch.setattr(tasks.engine, "dispose", fake_dispose)
+    monkeypatch.setattr(tasks, "engine", DummyEngine())
     monkeypatch.setattr(
         "secsentinel.repositories.scan_repo.ScanRepository.get_by_id",
         fake_get_by_id,
@@ -207,12 +208,13 @@ def test_celery_worker_task_marks_failed_with_sanitized_error_on_exception(
 
     dispose_called = False
 
-    async def fake_dispose() -> None:
-        nonlocal dispose_called
-        dispose_called = True
+    class DummyEngine:
+        async def dispose(self) -> None:
+            nonlocal dispose_called
+            dispose_called = True
 
     monkeypatch.setattr(tasks, "AsyncSessionLocal", lambda: DummySessionContext())
-    monkeypatch.setattr(tasks.engine, "dispose", fake_dispose)
+    monkeypatch.setattr(tasks, "engine", DummyEngine())
     monkeypatch.setattr(
         "secsentinel.repositories.scan_repo.ScanRepository.get_by_id",
         fake_get_by_id,
