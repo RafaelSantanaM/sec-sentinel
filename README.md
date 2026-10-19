@@ -83,19 +83,46 @@ flowchart LR
 ### 1. Subindo a Infraestrutura Completa com Docker Compose
 ```bash
 cp .env.example .env
+# Gere uma chave JWT criptograficamente forte e atualize JWT_SECRET_KEY no .env:
+# openssl rand -hex 32
 docker compose up --build -d
 ```
 
-### 2. Executando a Suíte de Testes, Linter (Bandit) e Type Checking Localmente
+### 2. Configuração e Execução em Ambiente Local (Virtualenv)
+```bash
+# 1. Criar e ativar o ambiente virtual Python 3.12+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e ".[dev]"
+
+# 2. Configurar variáveis de ambiente (.env) com chave JWT de alta entropia
+cp .env.example .env
+sed -i "s/^JWT_SECRET_KEY=.*/JWT_SECRET_KEY=$(openssl rand -hex 32)/" .env
+
+# 3. Aplicar migrações do banco de dados (Alembic)
+alembic upgrade head
+
+# 4. Criar o primeiro usuário ADMIN via CLI seguro (fora da superfície HTTP, lê senha via getpass)
+python -m secsentinel.cli create-admin --email admin@secsentinel.io
+
+# 5. Iniciar a API FastAPI (Uvicorn) e o Worker Assíncrono (Celery)
+uvicorn secsentinel.main:app --host 127.0.0.1 --port 8000 --reload
+celery -A secsentinel.worker.celery_app:celery_app worker --loglevel=info
+```
+
+### 3. Executando a Suíte de Testes, Linter (Bandit) e Type Checking Localmente
+> **Dica (Kali Linux / Debian):** Utilize sempre `python -m pytest` (dentro da `.venv` ativada ou via `.venv/bin/python -m pytest`) em vez de chamar `pytest` globalmente, garantindo que o interpretador e os plugins da `.venv` sejam carregados no `sys.path`.
+
 ```bash
 # 1. Lint & Regras de Segurança (Ruff + Flake8-Bandit)
-.venv/bin/ruff check .
+ruff check .
 
 # 2. Verificação Estrita de Tipos (MyPy Strict Mode)
-.venv/bin/mypy src
+mypy src
 
 # 3. Testes Automatizados de Segurança + Cobertura (>= 85%)
-.venv/bin/pytest -v --cov=secsentinel --cov-report=term-missing --cov-fail-under=85
+python -m pytest -v --cov=secsentinel --cov-report=term-missing --cov-fail-under=85
 ```
 
 ---
@@ -104,9 +131,11 @@ docker compose up --build -d
 
 | Método | Rota | Descrição | Controle de Acesso |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/auth/register` | Registro de usuário com política estrita de senha e hash Argon2id | Público (Rate Limited `5/min`) |
-| `POST` | `/api/v1/auth/login` | Autenticação e emissão de par `access_token` + `refresh_token` | Público (Rate Limited `5/min`) |
-| `GET` | `/api/v1/auth/admin/audit-ping` | Rota administrativa de verificação de privilégios | RBAC: `ADMIN` / `AUDITOR` |
-| `POST` | `/api/v1/scans` | Enfileira uma auditoria assíncrona (`pr_audit`, `api_audit`, `full_audit`) | Autenticado (`202 Accepted`) |
+| `POST` | `/api/v1/auth/register` | Registro de usuário (`DEVELOPER`) com política estrita de senha, `extra="forbid"` e hash Argon2id | Público (Rate Limited `10/minute`) |
+| `POST` | `/api/v1/auth/login` | Autenticação e emissão de par `access_token` + `refresh_token` | Público (Rate Limited `5/minute`) |
+| `POST` | `/api/v1/auth/refresh` | Rotação de par JWT usando um `refresh_token` válido | Público (Rate Limited `10/minute`) |
+| `GET` | `/api/v1/auth/admin-audit-check` | Rota administrativa de verificação de privilégios | RBAC: `ADMIN` / `AUDITOR` |
+| `PATCH` | `/api/v1/auth/users/{user_id}/role` | Promoção/alteração de papel RBAC (bloqueia auto-alteração) | RBAC: `ADMIN` |
+| `POST` | `/api/v1/scans` | Enfileira uma auditoria assíncrona (`pr_audit`, `api_audit`, `full_audit`) | Autenticado (`202 Accepted`, Rate Limited `20/minute`) |
 | `GET` | `/api/v1/scans/{scan_id}` | Consulta o status e achados brutos do Scan | Autenticado + Anti-BOLA |
 | `GET` | `/api/v1/scans/{scan_id}/report` | Gera o **Relatório Executivo** com `risk_score` e veredito (`PASS`/`WARN`/`BLOCK`) | Autenticado + Anti-BOLA |
