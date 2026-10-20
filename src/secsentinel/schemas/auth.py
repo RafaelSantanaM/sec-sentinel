@@ -1,9 +1,15 @@
 import re
 from uuid import UUID
 
+import email_validator
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from secsentinel.models.user import UserRole
+
+# Permite domínios internos/laboratório '.local' (ex: admin@secsentinel.local)
+# para facilitar homologação local e Active Directory, mantendo validação RFC 5322.
+if "local" in email_validator.SPECIAL_USE_DOMAIN_NAMES:
+    email_validator.SPECIAL_USE_DOMAIN_NAMES.remove("local")
 
 
 class UserCreate(BaseModel):

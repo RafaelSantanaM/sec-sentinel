@@ -41,8 +41,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run Ruff Linter & Bandit Security Rules (S)
+      - name: Run Ruff Linter (Code Quality & Style)
         run: ruff check .
+
+      - name: Run Bandit SAST Security Rules (via Ruff 'S' Ruleset)
+        run: ruff check --select S src
 
       - name: Run MyPy Strict Static Type Checking
         run: mypy src

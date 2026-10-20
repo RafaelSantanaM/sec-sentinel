@@ -43,12 +43,165 @@ async def test_cwe209_unhandled_exception_never_leaks_stack_trace_or_secrets() -
 
 @pytest.mark.asyncio
 async def test_health_check_endpoint() -> None:
-    """Valida o endpoint de healthcheck usado pelo Docker Compose e Load Balancers."""
+    """Valida o endpoint de liveness check (/health) usado pelo Kubernetes."""
     app = create_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_readiness_healthz_and_ready_endpoints_healthy_and_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Valida que /healthz e /ready testam ativamente PostgreSQL ('SELECT 1') e Redis ('PING'),
+    retornando HTTP 200 (healthy) quando ambos respondem e HTTP 503 (degraded) quando falham.
+    """
+    from secsentinel import main as main_module
+    from secsentinel.db.session import get_db_session
+
+    class FakeHealthySession:
+        async def execute(self, _stmt: object) -> int:
+            return 1
+
+    class FakeBrokenSession:
+        async def execute(self, _stmt: object) -> int:
+            raise ConnectionError("PostgreSQL connection refused")
+
+    class FakeHealthyRedis:
+        async def ping(self) -> bool:
+            return True
+
+        async def aclose(self) -> None:
+            return None
+
+    class FakeBrokenRedis:
+        async def ping(self) -> bool:
+            raise ConnectionError("Redis connection refused")
+
+        async def aclose(self) -> None:
+            return None
+
+    app = create_app()
+
+    # 1. Cenário Healthy: DB up + Redis up -> HTTP 200 OK
+    async def override_healthy_db() -> object:
+        yield FakeHealthySession()
+
+    app.dependency_overrides[get_db_session] = override_healthy_db
+    monkeypatch.setattr(main_module.aioredis, "from_url", lambda *a, **kw: FakeHealthyRedis())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_healthz = await client.get("/healthz")
+        resp_ready = await client.get("/ready")
+
+    assert resp_healthz.status_code == 200
+    assert resp_ready.status_code == 200
+    body = resp_healthz.json()
+    assert body["status"] == "healthy"
+    assert body["checks"]["database"]["status"] == "up"
+    assert body["checks"]["redis"]["status"] == "up"
+
+    # 2. Cenário Degraded: DB down + Redis down -> HTTP 503 Service Unavailable
+    async def override_broken_db() -> object:
+        yield FakeBrokenSession()
+
+    app.dependency_overrides[get_db_session] = override_broken_db
+    monkeypatch.setattr(main_module.aioredis, "from_url", lambda *a, **kw: FakeBrokenRedis())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_degraded = await client.get("/healthz")
+
+    assert resp_degraded.status_code == 503
+    deg_body = resp_degraded.json()
+    assert deg_body["status"] == "degraded"
+    assert deg_body["checks"]["database"]["status"] == "down"
+    assert deg_body["checks"]["redis"]["status"] == "down"
+
+
+def test_seed_demo_data_and_onboarding_banner(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    Valida que o script de Seed (`secsentinel.seed`) cria os usuários de teste,
+    popula o Scan demonstrativo de forma idempotente e imprime o banner com Swagger e JWT.
+    """
+    from secsentinel import seed
+    from secsentinel.models.user import User, UserRole
+
+    added_objects: list[object] = []
+
+    class FakeSession:
+        def add(self, obj: object) -> None:
+            added_objects.append(obj)
+
+        def add_all(self, objs: Sequence[object]) -> None:
+            added_objects.extend(objs)
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    class FakeSessionContext:
+        async def __aenter__(self) -> FakeSession:
+            return FakeSession()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class DummyEngine:
+        async def dispose(self) -> None:
+            return None
+
+    created_users: dict[str, User] = {}
+
+    async def fake_get_by_email(self: object, email: str) -> User | None:
+        return created_users.get(email)
+
+    async def fake_create_user(
+        self: object, email: str, hashed_password: str, role: UserRole
+    ) -> User:
+        user = User(
+            id=uuid4(),
+            email=email,
+            hashed_password=hashed_password,
+            role=role,
+            is_active=True,
+        )
+        created_users[email] = user
+        return user
+
+    async def fake_get_scan_by_id(self: object, scan_id: UUID) -> Scan | None:
+        return None
+
+    monkeypatch.setattr(seed, "AsyncSessionLocal", lambda: FakeSessionContext())
+    monkeypatch.setattr(seed, "engine", DummyEngine())
+    monkeypatch.setattr(
+        "secsentinel.repositories.user_repo.UserRepository.get_by_email",
+        fake_get_by_email,
+    )
+    monkeypatch.setattr(
+        "secsentinel.repositories.user_repo.UserRepository.create",
+        fake_create_user,
+    )
+    monkeypatch.setattr(
+        "secsentinel.repositories.scan_repo.ScanRepository.get_by_id",
+        fake_get_scan_by_id,
+    )
+
+    exit_code = seed.main()
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "http://localhost:8000/docs" in captured.out
+    assert "admin@secsentinel.local" in captured.out
+    assert "00000000-0000-0000-0000-000000000001" in captured.out
+    assert len(added_objects) == 4  # 1 Scan + 3 Findings
 
 
 def test_celery_worker_task_executes_pr_audit_and_returns_assessment(

@@ -1,0 +1,131 @@
+# ==============================================================================
+# 🛡️ SecSentinel — Coleção Interativa de Requisições (VS Code / Cursor REST Client)
+# ==============================================================================
+# Como usar:
+# 1. Instale a extensão "REST Client" (Huachao Mao) no VS Code ou Cursor.
+# 2. Suba o ambiente com: `make setup && make up`
+# 3. Clique em "Send Request" acima da requisição [2. Login ADMIN] para capturar
+#    automaticamente o `access_token` e `refresh_token` nas variáveis abaixo!
+# ==============================================================================
+
+@baseUrl = http://localhost:8000
+@adminEmail = admin@secsentinel.local
+@adminPassword = senha123
+@devEmail = dev@secsentinel.local
+@devPassword = SecSentinel#2026!
+@seededScanId = 00000000-0000-0000-0000-000000000001
+
+### 1.1 Liveness Probe (Verifica se o processo FastAPI/ASGI está vivo)
+GET {{baseUrl}}/health
+Accept: application/json
+
+### 1.2 Readiness & Deep Health Check Realista (Testa ativamente PostgreSQL + Redis)
+GET {{baseUrl}}/healthz
+Accept: application/json
+
+### 1.3 Readiness Probe Alias (Compatível com convenção Kubernetes /ready)
+GET {{baseUrl}}/ready
+Accept: application/json
+
+# ==============================================================================
+# 🔐 AUTENTICAÇÃO JWT & RBAC
+# ==============================================================================
+
+### 2.1 Login com Usuário ADMIN do Seed (Captura automática do Token JWT!)
+# @name login
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{adminEmail}}",
+  "password": "{{adminPassword}}"
+}
+
+### Variáveis dinâmicas extraídas automaticamente da resposta do Login acima:
+@accessToken = {{login.response.body.access_token}}
+@refreshToken = {{login.response.body.refresh_token}}
+
+### 2.2 Consultar Perfil do Usuário Autenticado (GET /api/v1/auth/me)
+GET {{baseUrl}}/api/v1/auth/me
+Authorization: Bearer {{accessToken}}
+Accept: application/json
+
+### 2.3 Verificar Acesso Administrativo RBAC (Exclusivo ADMIN e AUDITOR)
+GET {{baseUrl}}/api/v1/auth/admin-audit-check
+Authorization: Bearer {{accessToken}}
+Accept: application/json
+
+### 2.4 Rotação Segura de Par JWT via Refresh Token (Token Rotation)
+POST {{baseUrl}}/api/v1/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "{{refreshToken}}"
+}
+
+### 2.5 Registrar Novo Usuário DEVELOPER (Validação OWASP ASVS + Anti-Mass Assignment)
+POST {{baseUrl}}/api/v1/auth/register
+Content-Type: application/json
+
+{
+  "email": "qa.recruiter@secsentinel.io",
+  "password": "StrongRecruiter#2026!"
+}
+
+# ==============================================================================
+# 🔬 AUDITORIAS DE SEGURANÇA (SCANS) & RELATÓRIO EXECUTIVO CI/CD
+# ==============================================================================
+
+### 3.1 Consultar Relatório Executivo do Scan Pré-Populado pelo Seed (Veredito BLOCK)
+GET {{baseUrl}}/api/v1/scans/{{seededScanId}}/report
+Authorization: Bearer {{accessToken}}
+Accept: application/json
+
+### 3.2 Consultar Detalhes Brutos do Scan Pré-Populado
+GET {{baseUrl}}/api/v1/scans/{{seededScanId}}
+Authorization: Bearer {{accessToken}}
+Accept: application/json
+
+### 3.3 Disparar Novo Scan Assíncrono (PR Audit: Secret Scanner + SAST AST)
+# @name enqueueScan
+POST {{baseUrl}}/api/v1/scans
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "target_url": "https://github.com/acme-corp/checkout-service/pull/108",
+  "scan_type": "pr_audit",
+  "code_snippet": "import os\nimport subprocess\n\nAWS_KEY = \"AKIAIOSFODNN7EXAMPLE\"\n\ndef run_report(user_input: str):\n    eval(user_input)\n    subprocess.run(f\"echo {user_input}\", shell=True)\n"
+}
+
+### Captura automática do ID do Scan recém-enfileirado:
+@newScanId = {{enqueueScan.response.body.scan_id}}
+
+### 3.4 Consultar Relatório Executivo do Novo Scan Processado pelo Celery Worker
+GET {{baseUrl}}/api/v1/scans/{{newScanId}}/report
+Authorization: Bearer {{accessToken}}
+Accept: application/json
+
+# ==============================================================================
+# 🛡️ DEMONSTRAÇÃO DE DEFESA EM PROFUNDIDADE (TESTES DE SEGURANÇA NEGATIVOS)
+# ==============================================================================
+
+### 4.1 Teste de Bloqueio Anti-SSRF (Tentativa de acessar AWS Cloud Metadata 169.254.169.254 -> HTTP 422)
+POST {{baseUrl}}/api/v1/scans
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "target_url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+  "scan_type": "api_audit"
+}
+
+### 4.2 Teste de Bloqueio Anti-Mass Assignment (Tentativa de injetar role="admin" no registro -> HTTP 422)
+POST {{baseUrl}}/api/v1/auth/register
+Content-Type: application/json
+
+{
+  "email": "evil.hacker@secsentinel.io",
+  "password": "StrongPassword#2026!",
+  "role": "admin"
+}

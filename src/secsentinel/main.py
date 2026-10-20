@@ -1,13 +1,19 @@
 import logging
+import time
+from typing import Annotated, Any
 
-from fastapi import FastAPI, Request, status
+import redis.asyncio as aioredis
+from fastapi import Depends, FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from secsentinel.api.v1.router import api_v1_router
 from secsentinel.core.config import settings
 from secsentinel.core.rate_limit import limiter
+from secsentinel.db.session import get_db_session
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +42,37 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
+async def check_database_health(session: AsyncSession) -> dict[str, Any]:
+    """Executa uma sonda ativa ('SELECT 1') no PostgreSQL e mede a latência em ms."""
+    start = time.perf_counter()
+    try:
+        await session.execute(text("SELECT 1"))
+        latency_ms = round((time.perf_counter() - start) * 1000, 2)
+        return {"status": "up", "latency_ms": latency_ms}
+    except Exception as exc:
+        logger.warning("Falha na sonda de conectividade do PostgreSQL", exc_info=exc)
+        return {"status": "down"}
+
+
+async def check_redis_health() -> dict[str, Any]:
+    """Executa uma sonda ativa ('PING') no broker Redis e mede a latência em ms."""
+    start = time.perf_counter()
+    client = aioredis.from_url(
+        settings.REDIS_URL,
+        socket_connect_timeout=2.0,
+        socket_timeout=2.0,
+    )
+    try:
+        await client.ping()
+        latency_ms = round((time.perf_counter() - start) * 1000, 2)
+        return {"status": "up", "latency_ms": latency_ms}
+    except Exception as exc:
+        logger.warning("Falha na sonda de conectividade do Redis", exc_info=exc)
+        return {"status": "down"}
+    finally:
+        await client.aclose()
+
+
 def create_app() -> FastAPI:
     """Application Factory para facilitar testes isolados e múltiplas configurações."""
     # Em produção, desabilitamos Swagger/OpenAPI público para reduzir superfície de reconhecimento
@@ -59,8 +96,43 @@ def create_app() -> FastAPI:
     app.include_router(api_v1_router)
 
     @app.get("/health", tags=["System"])
-    async def health_check() -> dict[str, str]:
+    async def liveness_probe() -> dict[str, str]:
+        """
+        Liveness Probe leve: confirma que o processo Python/ASGI está vivo e respondendo.
+        Usado pelo Kubernetes (livenessProbe) para detectar travamento de event loop.
+        """
         return {"status": "ok", "environment": settings.ENVIRONMENT}
+
+    @app.get("/healthz", tags=["System"])
+    @app.get("/ready", tags=["System"])
+    async def readiness_probe(
+        session: Annotated[AsyncSession, Depends(get_db_session)],
+    ) -> JSONResponse:
+        """
+        Readiness & Deep Health Check realista: verifica ativamente a conectividade
+        com o banco de dados PostgreSQL ('SELECT 1') e com o broker Redis ('PING').
+        Retorna HTTP 200 (healthy) se ambos responderem ou HTTP 503 (degraded) se
+        alguma dependência crítica estiver indisponível.
+        """
+        db_check = await check_database_health(session)
+        redis_check = await check_redis_health()
+
+        is_healthy = db_check["status"] == "up" and redis_check["status"] == "up"
+        http_status = (
+            status.HTTP_200_OK if is_healthy else status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+
+        return JSONResponse(
+            status_code=http_status,
+            content={
+                "status": "healthy" if is_healthy else "degraded",
+                "environment": settings.ENVIRONMENT,
+                "checks": {
+                    "database": db_check,
+                    "redis": redis_check,
+                },
+            },
+        )
 
     return app
 

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: secsentinel-config
+  namespace: secsentinel
+  labels:
+    app.kubernetes.io/name: secsentinel
+    app.kubernetes.io/part-of: secsentinel-platform
+    app.kubernetes.io/managed-by: kubectl
+data:
+  ENVIRONMENT: "production"
+  PROJECT_NAME: "SecSentinel"
+  DEBUG: "false"
+  JWT_ALGORITHM: "HS256"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "15"
+  POSTGRES_HOST: "secsentinel-postgres.secsentinel.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "secsentinel_db"
+  REDIS_URL: "redis://secsentinel-redis.secsentinel.svc.cluster.local:6379/0"
+---
+# NOTA DE SEGURANÇA (DevSecOps):
+# Em produção real, este Secret NUNCA deve conter valores reais versionados no Git.
+# Deve ser injetado via External Secrets Operator (AWS Secrets Manager / HashiCorp Vault)
+# ou SealedSecrets. Mantido aqui apenas como referência declarativa de contrato.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: secsentinel-secrets
+  namespace: secsentinel
+  labels:
+    app.kubernetes.io/name: secsentinel
+    app.kubernetes.io/part-of: secsentinel-platform
+type: Opaque
+stringData:
+  POSTGRES_USER: "REPLACE_via_EXTERNAL_SECRETS_OPERATOR"
+  POSTGRES_PASSWORD: "REPLACE_via_EXTERNAL_SECRETS_OPERATOR"
+  JWT_SECRET_KEY: "REPLACE_WITH_64_CHAR_HEX_FROM_SECRET_MANAGER_AT_RUNTIME"
